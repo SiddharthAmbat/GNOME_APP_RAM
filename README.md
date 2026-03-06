@@ -39,10 +39,10 @@ Firefox  1200 MB      Code  850 MB      Chrome  1.8 GB
 
 ```bash
 # Clone or download the repository
-git clone https://github.com/SiddharthAmbat/GNOME_APP_RAM.git
+git clone https://github.com/Dipanshu0919/Active-App-RAM-GNOME.git
 
 # Copy the extension to the GNOME extensions directory
-EXT_DIR=~/.local/share/gnome-shell/extensions/active-app-ram@local
+EXT_DIR=~/.local/share/gnome-shell/extensions/active-app-ram@Dipanshu0919
 mkdir -p "$EXT_DIR/schemas"
 cp metadata.json extension.js prefs.js stylesheet.css "$EXT_DIR/"
 cp schemas/*.xml "$EXT_DIR/schemas/"
@@ -54,7 +54,7 @@ glib-compile-schemas "$EXT_DIR/schemas/"
 # On Wayland, log out and back in.
 
 # Enable the extension
-gnome-extensions enable active-app-ram@local
+gnome-extensions enable active-app-ram@Dipanshu0919
 ```
 
 ### Via GNOME Extensions app
@@ -67,7 +67,7 @@ gnome-extensions enable active-app-ram@local
 ## Project Structure
 
 ```
-active-app-ram@local/
+active-app-ram@Dipanshu0919/
 ├── metadata.json                                          – Extension metadata
 ├── extension.js                                           – Main extension logic
 ├── prefs.js                                               – Preferences / settings UI
