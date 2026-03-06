@@ -15,31 +15,77 @@ import * as Main from "resource:///org/gnome/shell/ui/main.js";
 // Maximum characters for the application name before truncation
 const MAX_APP_NAME_LENGTH = 20;
 
-// Refresh interval in milliseconds (2 seconds)
-const REFRESH_INTERVAL_MS = 2000;
+// Refresh interval in seconds
+const REFRESH_INTERVAL_SECONDS = 2;
 
 // RAM threshold in MB above which text turns red
 const HIGH_RAM_THRESHOLD_MB = 2048;
 
 /**
- * Reads the RSS (Resident Set Size) memory for a given PID by parsing
- * /proc/<pid>/status. Returns the value in kilobytes, or null on failure.
+ * Returns the process name (comm) for a given PID by running:
+ *   ps -p PID -o comm=
+ * Returns null on failure or if the process is not found.
  *
  * @param {number} pid - The process ID to inspect.
- * @returns {number|null} RSS in kilobytes, or null if unavailable.
+ * @returns {string|null} Process name, or null if unavailable.
  */
-function getRssKbForPid(pid) {
-  if (!pid || pid <= 0) return null;
+function getProcessNameForPid(pid) {
+  if (!pid || !Number.isInteger(pid) || pid <= 0) return null;
 
   try {
-    const [ok, contents] = GLib.file_get_contents(`/proc/${pid}/status`);
-    if (!ok) return null;
+    const [ok, stdout] = GLib.spawn_sync(
+      null,
+      ["ps", "-p", String(pid), "-o", "comm="],
+      null,
+      GLib.SpawnFlags.SEARCH_PATH,
+      null
+    );
+    if (!ok || !stdout) return null;
 
-    const text = new TextDecoder().decode(contents);
-    const match = text.match(/^VmRSS:\s+(\d+)\s+kB/m);
-    if (!match) return null;
+    const name = new TextDecoder().decode(stdout).trim();
+    // Only accept names composed of safe characters (alphanumeric, hyphen, dot)
+    if (!/^[\w.-]+$/.test(name)) return null;
+    return name.length > 0 ? name : null;
+  } catch (_e) {
+    return null;
+  }
+}
 
-    return parseInt(match[1], 10);
+/**
+ * Returns the total RSS (in kilobytes) across all processes with the given
+ * process name by running:
+ *   ps -C NAME -o rss=
+ * and summing all values.
+ *
+ * @param {string} processName - The process name to look up.
+ * @returns {number|null} Total RSS in kilobytes, or null if unavailable.
+ */
+function getTotalRssKbForProcessName(processName) {
+  if (!processName) return null;
+
+  try {
+    const [ok, stdout] = GLib.spawn_sync(
+      null,
+      ["ps", "-C", processName, "-o", "rss="],
+      null,
+      GLib.SpawnFlags.SEARCH_PATH,
+      null
+    );
+    if (!ok || !stdout) return null;
+
+    const text = new TextDecoder().decode(stdout).trim();
+    if (text.length === 0) return null;
+
+    let total = 0;
+    let parsed = 0;
+    for (const line of text.split("\n")) {
+      const val = parseInt(line.trim(), 10);
+      if (!isNaN(val)) {
+        total += val;
+        parsed++;
+      }
+    }
+    return parsed > 0 ? total : null;
   } catch (_e) {
     return null;
   }
@@ -161,12 +207,12 @@ export default class ActiveAppRamExtension {
 
   /**
    * Starts the GLib periodic timeout that refreshes the label every
-   * REFRESH_INTERVAL_MS milliseconds.
+   * REFRESH_INTERVAL_SECONDS seconds.
    */
   _startTimer() {
-    this._timeoutId = GLib.timeout_add(
+    this._timeoutId = GLib.timeout_add_seconds(
       GLib.PRIORITY_DEFAULT,
-      REFRESH_INTERVAL_MS,
+      REFRESH_INTERVAL_SECONDS,
       () => {
         this._update();
         return GLib.SOURCE_CONTINUE;
@@ -185,7 +231,8 @@ export default class ActiveAppRamExtension {
   }
 
   /**
-   * Reads the focused application name and RSS, then updates the panel label.
+   * Reads the focused application name and total RSS across all its processes,
+   * then updates the panel label.
    * Applies a red color when RAM usage exceeds HIGH_RAM_THRESHOLD_MB.
    */
   _update() {
@@ -200,10 +247,19 @@ export default class ActiveAppRamExtension {
     }
 
     const { appName, pid } = info;
-    const rssKb = getRssKbForPid(pid);
+    const processName = getProcessNameForPid(pid);
+
+    if (!processName) {
+      // Could not resolve process name; show app name without memory
+      this._label.set_text(`${truncateName(appName, MAX_APP_NAME_LENGTH)}`);
+      this._label.set_style(null);
+      return;
+    }
+
+    const rssKb = getTotalRssKbForProcessName(processName);
 
     if (rssKb === null) {
-      // PID found but /proc entry is unavailable (process may have just exited)
+      // Process list query failed or returned no data
       this._label.set_text(`${truncateName(appName, MAX_APP_NAME_LENGTH)}`);
       this._label.set_style(null);
       return;
