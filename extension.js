@@ -60,6 +60,86 @@ function getProcessNameForPid(pid) {
 }
 
 /**
+ * Returns the total CPU usage percentage across all processes with the given
+ * process name by running:
+ *   ps -C NAME -o %cpu=
+ * and summing all values.
+ *
+ * @param {string} processName - The process name to look up.
+ * @returns {number|null} Total CPU percentage (integer), or null if unavailable.
+ */
+function getCpuPercentForProcessName(processName) {
+  if (!processName) return null;
+
+  try {
+    const [ok, stdout] = GLib.spawn_sync(
+      null,
+      ["ps", "-C", processName, "-o", "%cpu="],
+      null,
+      GLib.SpawnFlags.SEARCH_PATH,
+      null
+    );
+    if (!ok || !stdout) return null;
+
+    const text = new TextDecoder().decode(stdout).trim();
+    if (text.length === 0) return null;
+
+    let total = 0;
+    let parsed = 0;
+    for (const line of text.split("\n")) {
+      const val = parseFloat(line.trim());
+      if (!isNaN(val)) {
+        total += val;
+        parsed++;
+      }
+    }
+    return parsed > 0 ? Math.round(total) : null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+/**
+ * Returns the top N processes by RSS (in kilobytes), aggregated by process
+ * name. Runs:
+ *   ps -eo comm,rss
+ *
+ * @param {number} count - Number of top processes to return.
+ * @returns {{name: string, rssKb: number}[]} Sorted array of top processes.
+ */
+function getTopRamProcesses(count) {
+  try {
+    const [ok, stdout] = GLib.spawn_sync(
+      null,
+      ["ps", "-eo", "comm,rss"],
+      null,
+      GLib.SpawnFlags.SEARCH_PATH,
+      null
+    );
+    if (!ok || !stdout) return [];
+
+    const text = new TextDecoder().decode(stdout).trim();
+    const map = new Map();
+    for (const line of text.split("\n")) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 2) continue;
+      const name = parts[0];
+      const rss = parseInt(parts[1], 10);
+      // Skip header line and invalid values
+      if (name === "COMMAND" || isNaN(rss)) continue;
+      map.set(name, (map.get(name) || 0) + rss);
+    }
+
+    return [...map.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, count)
+      .map(([name, rssKb]) => ({ name, rssKb }));
+  } catch (_e) {
+    return [];
+  }
+}
+
+/**
  * Returns the total RSS (in kilobytes) across all processes with the given
  * process name by running:
  *   ps -C NAME -o rss=
@@ -196,6 +276,7 @@ export default class ActiveAppRamExtension extends Extension {
     this._settings = null;
     this._settingsChangedIds = [];
     this._totalMemoryKb = null;
+    this._topProcessesSection = null;
   }
 
   /**
@@ -217,12 +298,24 @@ export default class ActiveAppRamExtension extends Extension {
     });
     this._indicator.add_child(this._label);
 
-    // Add a single menu item: "Open Settings"
+    // Add a section for top RAM processes (refreshed each time menu opens)
+    this._topProcessesSection = new PopupMenu.PopupMenuSection();
+    this._indicator.menu.addMenuItem(this._topProcessesSection);
+
+    // Separator between top-process list and settings item
+    this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+    // Settings item
     const settingsItem = new PopupMenu.PopupMenuItem("Open Settings");
     settingsItem.connect("activate", () => {
       this.openPreferences();
     });
     this._indicator.menu.addMenuItem(settingsItem);
+
+    // Rebuild the process list every time the menu is opened
+    this._indicator.menu.connect("open-state-changed", (_menu, isOpen) => {
+      if (isOpen) this._refreshTopProcessesMenu();
+    });
 
     // Insert the indicator into the configured panel position
     this._addToPanel();
@@ -234,7 +327,6 @@ export default class ActiveAppRamExtension extends Extension {
     const watchedKeys = [
       "panel-position",
       "show-app-name",
-      "show-app-icon",
       "show-ram-usage",
       "show-cpu-usage",
       "show-ram-percentage",
@@ -243,6 +335,7 @@ export default class ActiveAppRamExtension extends Extension {
       "compact-mode",
       "colored-warning",
       "ram-warning-threshold",
+      "separator-style",
     ];
     for (const key of watchedKeys) {
       const id = this._settings.connect(`changed::${key}`, () => {
@@ -291,6 +384,7 @@ export default class ActiveAppRamExtension extends Extension {
       this._indicator.destroy();
       this._indicator = null;
       this._label = null;
+      this._topProcessesSection = null;
     }
   }
 
@@ -406,14 +500,19 @@ export default class ActiveAppRamExtension extends Extension {
     }
 
     const showAppName = this._settings.get_boolean("show-app-name");
-    const showAppIcon = this._settings.get_boolean("show-app-icon");
     const showRamUsage = this._settings.get_boolean("show-ram-usage");
+    const showCpuUsage = this._settings.get_boolean("show-cpu-usage");
     const showRamPct = this._settings.get_boolean("show-ram-percentage");
     const memoryUnit = this._settings.get_enum("memory-unit");
     const coloredWarning = this._settings.get_boolean("colored-warning");
     const warningThresholdGb = this._settings.get_double(
       "ram-warning-threshold"
     );
+    const separatorStyle = this._settings.get_enum("separator-style");
+
+    // Separator strings indexed by separator-style enum value
+    const SEPARATORS = [" ", " • ", " | "];
+    const sep = SEPARATORS[separatorStyle] ?? " ";
 
     const { appName, pid } = info;
     const processName = getProcessNameForPid(pid);
@@ -422,34 +521,41 @@ export default class ActiveAppRamExtension extends Extension {
     // Build the label text
     const parts = [];
 
-    // TODO: Replace emoji with a proper St.Icon using the app's desktop file icon
-    // once desktop-file lookup is implemented. Emoji is used as a placeholder.
-    if (showAppIcon) {
-      parts.push("🖥️");
-    }
-
     // Application name
     if (showAppName) {
       parts.push(displayName);
     }
 
-    // RAM usage
+    // RAM usage block: "1.6 GB" or "1.6 GB (40%)" combined as one part
     let rssKb = null;
     if (processName && (showRamUsage || showRamPct)) {
       rssKb = getTotalRssKbForProcessName(processName);
     }
 
-    if (rssKb !== null && showRamUsage) {
-      parts.push(formatMemory(rssKb, memoryUnit));
+    if (rssKb !== null) {
+      const ramParts = [];
+      if (showRamUsage) {
+        ramParts.push(formatMemory(rssKb, memoryUnit));
+      }
+      if (showRamPct && this._totalMemoryKb) {
+        const pct = ((rssKb / this._totalMemoryKb) * 100).toFixed(1);
+        ramParts.push(`(${pct}%)`);
+      }
+      if (ramParts.length > 0) {
+        parts.push(ramParts.join(" "));
+      }
     }
 
-    if (rssKb !== null && showRamPct && this._totalMemoryKb) {
-      const pct = ((rssKb / this._totalMemoryKb) * 100).toFixed(1);
-      parts.push(`(${pct}%)`);
+    // CPU usage
+    if (showCpuUsage && processName) {
+      const cpuPct = getCpuPercentForProcessName(processName);
+      if (cpuPct !== null) {
+        parts.push(`${cpuPct}%`);
+      }
     }
 
     // Fall back if nothing is enabled
-    const text = parts.length > 0 ? parts.join("  ") : displayName;
+    const text = parts.length > 0 ? parts.join(sep) : displayName;
     this._label.set_text(text);
 
     // Colored warning when RAM exceeds threshold
@@ -459,6 +565,40 @@ export default class ActiveAppRamExtension extends Extension {
       this._label.set_style("color: #ff4444;");
     } else {
       this._label.set_style(null);
+    }
+  }
+
+  /**
+   * Rebuilds the top RAM processes section in the indicator menu.
+   * Called each time the menu is opened.
+   */
+  _refreshTopProcessesMenu() {
+    if (!this._topProcessesSection || !this._settings) return;
+
+    this._topProcessesSection.removeAll();
+
+    // Header
+    const headerItem = new PopupMenu.PopupMenuItem("Top RAM Processes", {
+      reactive: false,
+    });
+    headerItem.label.set_style("font-weight: bold;");
+    this._topProcessesSection.addMenuItem(headerItem);
+
+    const memUnit = this._settings.get_enum("memory-unit");
+    const processes = getTopRamProcesses(5);
+
+    if (processes.length === 0) {
+      const emptyItem = new PopupMenu.PopupMenuItem("No data available", {
+        reactive: false,
+      });
+      this._topProcessesSection.addMenuItem(emptyItem);
+      return;
+    }
+
+    for (const { name, rssKb } of processes) {
+      const itemLabel = `${truncateName(name, 15)}  ${formatMemory(rssKb, memUnit)}`;
+      const item = new PopupMenu.PopupMenuItem(itemLabel, { reactive: false });
+      this._topProcessesSection.addMenuItem(item);
     }
   }
 }

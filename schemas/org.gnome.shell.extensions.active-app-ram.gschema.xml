@@ -13,6 +13,12 @@
     <value nick="gb"   value="2"/>
   </enum>
 
+  <enum id="org.gnome.shell.extensions.active-app-ram.SeparatorStyle">
+    <value nick="space"  value="0"/>
+    <value nick="bullet" value="1"/>
+    <value nick="pipe"   value="2"/>
+  </enum>
+
   <schema id="org.gnome.shell.extensions.active-app-ram"
           path="/org/gnome/shell/extensions/active-app-ram/">
 
@@ -30,12 +36,6 @@
       <description>Whether to display the focused application name.</description>
     </key>
 
-    <key name="show-app-icon" type="b">
-      <default>false</default>
-      <summary>Show application icon</summary>
-      <description>Whether to display an icon next to the application name.</description>
-    </key>
-
     <key name="show-ram-usage" type="b">
       <default>true</default>
       <summary>Show RAM usage</summary>
@@ -45,7 +45,7 @@
     <key name="show-cpu-usage" type="b">
       <default>false</default>
       <summary>Show CPU usage</summary>
-      <description>Whether to display CPU usage (future feature).</description>
+      <description>Whether to display the CPU usage percentage of the focused application.</description>
     </key>
 
     <key name="show-ram-percentage" type="b">
@@ -59,6 +59,12 @@
       <default>'auto'</default>
       <summary>Memory unit style</summary>
       <description>How memory values are formatted: Auto (MB/GB), Always MB, or Always GB.</description>
+    </key>
+
+    <key name="separator-style" enum="org.gnome.shell.extensions.active-app-ram.SeparatorStyle">
+      <default>'space'</default>
+      <summary>Separator style</summary>
+      <description>How display elements are separated in the panel: space, bullet (•), or pipe (|).</description>
     </key>
 
     <!-- Update settings -->

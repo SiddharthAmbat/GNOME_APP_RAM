@@ -64,12 +64,6 @@ export default class ActiveAppRamPreferences extends ExtensionPreferences {
     );
 
     this._addSwitchRow(
-      displayGroup, settings, "show-app-icon",
-      "Show Application Icon",
-      "Display an icon next to the application name"
-    );
-
-    this._addSwitchRow(
       displayGroup, settings, "show-ram-usage",
       "Show RAM Usage",
       "Display the RAM usage value"
@@ -78,7 +72,7 @@ export default class ActiveAppRamPreferences extends ExtensionPreferences {
     this._addSwitchRow(
       displayGroup, settings, "show-cpu-usage",
       "Show CPU Usage",
-      "Display CPU usage (future feature)"
+      "Display the CPU usage percentage of the focused application"
     );
 
     this._addSwitchRow(
@@ -112,6 +106,19 @@ export default class ActiveAppRamPreferences extends ExtensionPreferences {
       settings.set_enum("memory-unit", unitRow.get_selected());
     });
     formattingGroup.add(unitRow);
+
+    const separatorRow = new Adw.ComboRow({
+      title: "Separator Style",
+      subtitle: "Character used between display elements",
+      model: new Gtk.StringList({
+      strings: ["Space (Brave 1.6 GB)", "Bullet (Brave • 1.6 GB)", "Pipe (Brave | 1.6 GB)"],
+      }),
+    });
+    separatorRow.set_selected(settings.get_enum("separator-style"));
+    separatorRow.connect("notify::selected", () => {
+      settings.set_enum("separator-style", separatorRow.get_selected());
+    });
+    formattingGroup.add(separatorRow);
 
     // ── Update page ────────────────────────────────────────────────────────
     const updatePage = new Adw.PreferencesPage({
