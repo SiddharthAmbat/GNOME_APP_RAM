@@ -26,6 +26,9 @@ const MAX_APP_NAME_LENGTH = 20;
 // Panel box names keyed by the GSettings enum value
 const PANEL_BOXES = ["left", "center", "right"];
 
+// Default panel box when position is out of range
+const DEFAULT_PANEL_BOX = "right";
+
 /**
  * Returns the process name (comm) for a given PID by running:
  *   ps -p PID -o comm=
@@ -208,7 +211,7 @@ export default class ActiveAppRamExtension extends Extension {
 
     // Create the label widget inside the button
     this._label = new St.Label({
-      text: "…",
+      text: "Loading...",
       y_align: Clutter.ActorAlign.CENTER,
       style_class: "active-app-ram-label",
     });
@@ -298,7 +301,7 @@ export default class ActiveAppRamExtension extends Extension {
    */
   _addToPanel() {
     const position = this._settings.get_enum("panel-position");
-    const box = PANEL_BOXES[position] ?? "right";
+    const box = PANEL_BOXES[position] ?? DEFAULT_PANEL_BOX;
     Main.panel.addToStatusArea(this.metadata.uuid, this._indicator, 0, box);
   }
 
@@ -314,7 +317,7 @@ export default class ActiveAppRamExtension extends Extension {
 
     // Re-insert at new position
     const position = this._settings.get_enum("panel-position");
-    const box = PANEL_BOXES[position] ?? "right";
+    const box = PANEL_BOXES[position] ?? DEFAULT_PANEL_BOX;
 
     // The container corresponding to the box name
     const container = Main.panel.statusArea;
@@ -419,7 +422,8 @@ export default class ActiveAppRamExtension extends Extension {
     // Build the label text
     const parts = [];
 
-    // Icon (simple emoji stand-in; real icon support would need St.Icon)
+    // TODO: Replace emoji with a proper St.Icon using the app's desktop file icon
+    // once desktop-file lookup is implemented. Emoji is used as a placeholder.
     if (showAppIcon) {
       parts.push("🖥️");
     }
