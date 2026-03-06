@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="active-app-ram">
+
+  <enum id="org.gnome.shell.extensions.active-app-ram.PanelPosition">
+    <value nick="left"   value="0"/>
+    <value nick="center" value="1"/>
+    <value nick="right"  value="2"/>
+  </enum>
+
+  <enum id="org.gnome.shell.extensions.active-app-ram.MemoryUnit">
+    <value nick="auto" value="0"/>
+    <value nick="mb"   value="1"/>
+    <value nick="gb"   value="2"/>
+  </enum>
+
+  <schema id="org.gnome.shell.extensions.active-app-ram"
+          path="/org/gnome/shell/extensions/active-app-ram/">
+
+    <!-- Position settings -->
+    <key name="panel-position" enum="org.gnome.shell.extensions.active-app-ram.PanelPosition">
+      <default>'right'</default>
+      <summary>Panel position</summary>
+      <description>Where the indicator appears in the top bar (left, center, or right).</description>
+    </key>
+
+    <!-- Display settings -->
+    <key name="show-app-name" type="b">
+      <default>true</default>
+      <summary>Show application name</summary>
+      <description>Whether to display the focused application name.</description>
+    </key>
+
+    <key name="show-app-icon" type="b">
+      <default>false</default>
+      <summary>Show application icon</summary>
+      <description>Whether to display an icon next to the application name.</description>
+    </key>
+
+    <key name="show-ram-usage" type="b">
+      <default>true</default>
+      <summary>Show RAM usage</summary>
+      <description>Whether to display the RAM usage value.</description>
+    </key>
+
+    <key name="show-cpu-usage" type="b">
+      <default>false</default>
+      <summary>Show CPU usage</summary>
+      <description>Whether to display CPU usage (future feature).</description>
+    </key>
+
+    <key name="show-ram-percentage" type="b">
+      <default>false</default>
+      <summary>Show RAM usage in percentage</summary>
+      <description>Whether to display RAM usage as a percentage of total system memory.</description>
+    </key>
+
+    <!-- Formatting settings -->
+    <key name="memory-unit" enum="org.gnome.shell.extensions.active-app-ram.MemoryUnit">
+      <default>'auto'</default>
+      <summary>Memory unit style</summary>
+      <description>How memory values are formatted: Auto (MB/GB), Always MB, or Always GB.</description>
+    </key>
+
+    <!-- Update settings -->
+    <key name="refresh-interval" type="i">
+      <default>2</default>
+      <summary>Refresh interval</summary>
+      <description>How often the indicator updates, in seconds (1–10).</description>
+      <range min="1" max="10"/>
+    </key>
+
+    <!-- Appearance settings -->
+    <key name="compact-mode" type="b">
+      <default>false</default>
+      <summary>Compact mode</summary>
+      <description>Use a more compact display with less padding.</description>
+    </key>
+
+    <key name="colored-warning" type="b">
+      <default>true</default>
+      <summary>Colored warning</summary>
+      <description>Turn the label red when RAM usage exceeds the warning threshold.</description>
+    </key>
+
+    <key name="ram-warning-threshold" type="d">
+      <default>2.0</default>
+      <summary>RAM warning threshold (GB)</summary>
+      <description>RAM usage threshold in GB above which the label turns red.</description>
+    </key>
+
+  </schema>
+</schemalist>

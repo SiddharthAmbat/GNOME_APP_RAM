@@ -1,6 +1,6 @@
 # Active App RAM – GNOME Shell Extension
 
-Displays the **RAM usage of the currently focused application** in the GNOME top bar panel (right side).
+Displays the **RAM usage of the currently focused application** in the GNOME top bar panel.
 
 ```
 Firefox  1200 MB      Code  850 MB      Chrome  1.8 GB
@@ -11,11 +11,15 @@ Firefox  1200 MB      Code  850 MB      Chrome  1.8 GB
 ## Features
 
 * Shows **app name + RSS memory** for the focused window in the top bar.
-* Refreshes automatically every **2 seconds**.
-* Updates instantly when you **switch windows**.
-* Formats memory as **MB** (< 1024 MB) or **GB** (≥ 1024 MB).
+* **Settings panel** – click the indicator and choose "Open Settings" to configure behaviour.
+* **Configurable panel position** – left, center, or right.
+* **Display toggles** – show/hide app name, app icon, RAM usage, RAM percentage.
+* **Memory unit style** – Auto (MB/GB), Always MB, or Always GB.
+* **Adjustable refresh interval** – 1–10 seconds (default 2).
+* **Compact mode** – smaller font and tighter padding.
+* **Colored warning** – label turns red when RAM exceeds a configurable threshold.
+* Settings apply **immediately** without restarting GNOME Shell.
 * Shows **"No App"** when no window is focused.
-* **Turns red** when RAM usage exceeds 2 GB.
 * Long application names are **truncated** to keep the bar tidy.
 
 ---
@@ -38,9 +42,13 @@ Firefox  1200 MB      Code  850 MB      Chrome  1.8 GB
 git clone https://github.com/SiddharthAmbat/GNOME_APP_RAM.git
 
 # Copy the extension to the GNOME extensions directory
-mkdir -p ~/.local/share/gnome-shell/extensions/active-app-ram@local
-cp metadata.json extension.js stylesheet.css \
-   ~/.local/share/gnome-shell/extensions/active-app-ram@local/
+EXT_DIR=~/.local/share/gnome-shell/extensions/active-app-ram@local
+mkdir -p "$EXT_DIR/schemas"
+cp metadata.json extension.js prefs.js stylesheet.css "$EXT_DIR/"
+cp schemas/*.xml "$EXT_DIR/schemas/"
+
+# Compile the GSettings schema
+glib-compile-schemas "$EXT_DIR/schemas/"
 
 # Reload GNOME Shell (X11 only – press Alt+F2, type 'r', press Enter)
 # On Wayland, log out and back in.
@@ -60,10 +68,34 @@ gnome-extensions enable active-app-ram@local
 
 ```
 active-app-ram@local/
-├── metadata.json    – Extension metadata (UUID, supported shell versions)
-├── extension.js     – Main extension logic (ES module)
-└── stylesheet.css   – Panel label styling
+├── metadata.json                                          – Extension metadata
+├── extension.js                                           – Main extension logic
+├── prefs.js                                               – Preferences / settings UI
+├── stylesheet.css                                         – Panel label styling
+└── schemas/
+    └── org.gnome.shell.extensions.active-app-ram.gschema.xml  – GSettings schema
 ```
+
+---
+
+## Settings
+
+Open the settings panel by clicking the indicator in the top bar and selecting
+**Open Settings**, or from the GNOME Extensions app.
+
+| Category | Setting | Default |
+|----------|---------|---------|
+| Position | Panel position (left / center / right) | Right |
+| Display | Show application name | On |
+| Display | Show application icon | Off |
+| Display | Show RAM usage | On |
+| Display | Show CPU usage *(future)* | Off |
+| Display | Show RAM as percentage | Off |
+| Formatting | Memory unit (Auto / MB / GB) | Auto |
+| Updates | Refresh interval (1–10 s) | 2 s |
+| Appearance | Compact mode | Off |
+| Appearance | Colored warning | On |
+| Appearance | RAM warning threshold | 2.0 GB |
 
 ---
 
@@ -71,9 +103,11 @@ active-app-ram@local/
 
 1. **Focus detection** – connects to `global.display notify::focus-window` to catch every window switch immediately.
 2. **PID lookup** – calls `window.get_pid()` on the focused `MetaWindow`.
-3. **Memory reading** – reads `/proc/<pid>/status` and extracts the `VmRSS` field (non-blocking file read via `GLib.file_get_contents`).
-4. **Periodic refresh** – a `GLib.timeout_add` callback runs every 2 s to keep the value current even without window switches.
-5. **Clean teardown** – `disable()` removes the timeout, disconnects the signal, and destroys the `St.Label`.
+3. **Process name resolution** – runs `ps -p PID -o comm=` to get the process name.
+4. **Memory reading** – runs `ps -C PROCESSNAME -o rss=` and sums all RSS values.
+5. **Periodic refresh** – a `GLib.timeout_add_seconds` callback runs at the configured interval.
+6. **Settings** – uses `Gio.Settings` to read preferences; changes are applied immediately via `connect('changed::key')`.
+7. **Clean teardown** – `disable()` removes the timeout, disconnects all signals, and destroys the indicator.
 
 ---
 
