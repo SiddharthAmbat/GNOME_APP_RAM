@@ -1,0 +1,7 @@
+/* Active App RAM – panel label styling */
+
+.active-app-ram-label {
+    font-size: 13px;
+    padding: 0 8px;
+    color: #ffffff;
+}
