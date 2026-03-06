@@ -1,9 +1,9 @@
 {
   "name": "Active App RAM",
   "description": "Displays the RAM usage of the currently focused application in the GNOME top bar panel.",
-  "uuid": "active-app-ram@local",
+  "uuid": "active-app-ram@Dipanshu0919",
   "shell-version": ["45", "46"],
   "version": 2,
-  "url": "https://github.com/SiddharthAmbat/GNOME_APP_RAM",
+  "url": "https://github.com/Dipanshu0919/Active-App-RAM-GNOME",
   "settings-schema": "org.gnome.shell.extensions.active-app-ram"
 }
