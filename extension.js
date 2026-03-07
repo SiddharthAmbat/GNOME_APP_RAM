@@ -29,6 +29,9 @@ const PANEL_BOXES = ["left", "center", "right"];
 // Default panel box when position is out of range
 const DEFAULT_PANEL_BOX = "right";
 
+// Number of top processes to display in the dropdown menu
+const TOP_PROCESSES_COUNT = 5;
+
 /**
  * Returns the process name (comm) for a given PID by running:
  *   ps -p PID -o comm=
@@ -176,6 +179,45 @@ function getTopRamProcesses(count) {
 }
 
 /**
+ * Returns the top N processes by CPU usage (%), aggregated by process name.
+ * Runs:
+ *   ps -eo comm,%cpu --no-headers
+ *
+ * @param {number} count - Number of top processes to return.
+ * @returns {{name: string, cpuPct: number}[]} Sorted array of top processes.
+ */
+function getTopCpuProcesses(count) {
+  try {
+    const [ok, stdout] = GLib.spawn_sync(
+      null,
+      ["ps", "-eo", "comm,%cpu", "--no-headers"],
+      null,
+      GLib.SpawnFlags.SEARCH_PATH,
+      null
+    );
+    if (!ok || !stdout) return [];
+
+    const text = new TextDecoder().decode(stdout).trim();
+    const map = new Map();
+    for (const line of text.split("\n")) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 2) continue;
+      const name = parts[0];
+      const cpu = parseFloat(parts[parts.length - 1]);
+      if (isNaN(cpu)) continue;
+      map.set(name, (map.get(name) || 0) + cpu);
+    }
+
+    return [...map.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, count)
+      .map(([name, cpuPct]) => ({ name, cpuPct }));
+  } catch (_e) {
+    return [];
+  }
+}
+
+/**
  * Returns the total RSS (in kilobytes) across all processes with the given
  * process name by running:
  *   ps -C NAME -o rss=
@@ -210,6 +252,46 @@ function getTotalRssKbForProcessName(processName) {
       }
     }
     return parsed > 0 ? total : null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+/**
+ * Returns the total CPU percentage across all processes with the given
+ * process name by running:
+ *   ps -C NAME -o %cpu --no-headers
+ * and summing all values.
+ *
+ * @param {string} processName - The process name to look up.
+ * @returns {number|null} Total CPU percentage, or null if unavailable.
+ */
+function getCpuPercentForProcessName(processName) {
+  if (!processName) return null;
+
+  try {
+    const [ok, stdout] = GLib.spawn_sync(
+      null,
+      ["ps", "-C", processName, "-o", "%cpu", "--no-headers"],
+      null,
+      GLib.SpawnFlags.SEARCH_PATH,
+      null
+    );
+    if (!ok || !stdout) return null;
+
+    const text = new TextDecoder().decode(stdout).trim();
+    if (text.length === 0) return null;
+
+    let total = 0;
+    let parsed = 0;
+    for (const line of text.split("\n")) {
+      const val = parseFloat(line.trim());
+      if (!isNaN(val)) {
+        total += val;
+        parsed++;
+      }
+    }
+    return parsed > 0 ? parseFloat(total.toFixed(1)) : null;
   } catch (_e) {
     return null;
   }
@@ -313,6 +395,7 @@ export default class ActiveAppRamExtension extends Extension {
     this._settingsChangedIds = [];
     this._totalMemoryKb = null;
     this._topProcessesSection = null;
+    this._topCpuSection = null;
     // Delta-based CPU sampling state
     this._prevCpuProcessName = null;
     this._prevProcessJiffies = null;
@@ -342,6 +425,11 @@ export default class ActiveAppRamExtension extends Extension {
     this._topProcessesSection = new PopupMenu.PopupMenuSection();
     this._indicator.menu.addMenuItem(this._topProcessesSection);
 
+    // Add a section for top CPU processes (refreshed each time menu opens)
+    this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+    this._topCpuSection = new PopupMenu.PopupMenuSection();
+    this._indicator.menu.addMenuItem(this._topCpuSection);
+
     // Separator between top-process list and settings item
     this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
@@ -354,7 +442,10 @@ export default class ActiveAppRamExtension extends Extension {
 
     // Rebuild the process list every time the menu is opened
     this._indicator.menu.connect("open-state-changed", (_menu, isOpen) => {
-      if (isOpen) this._refreshTopProcessesMenu();
+      if (isOpen) {
+        this._refreshTopProcessesMenu();
+        this._refreshTopCpuMenu();
+      }
     });
 
     // Insert the indicator into the configured panel position
@@ -366,6 +457,7 @@ export default class ActiveAppRamExtension extends Extension {
     // Listen for settings changes and react immediately
     const watchedKeys = [
       "panel-position",
+      "panel-position-offset",
       "show-app-name",
       "show-ram-usage",
       "show-cpu-usage",
@@ -425,6 +517,7 @@ export default class ActiveAppRamExtension extends Extension {
       this._indicator = null;
       this._label = null;
       this._topProcessesSection = null;
+      this._topCpuSection = null;
     }
 
     this._prevCpuProcessName = null;
@@ -440,7 +533,8 @@ export default class ActiveAppRamExtension extends Extension {
   _addToPanel() {
     const position = this._settings.get_enum("panel-position");
     const box = PANEL_BOXES[position] ?? DEFAULT_PANEL_BOX;
-    Main.panel.addToStatusArea(this.metadata.uuid, this._indicator, 0, box);
+    const offset = this._settings.get_int("panel-position-offset");
+    Main.panel.addToStatusArea(this.metadata.uuid, this._indicator, offset, box);
   }
 
   /**
@@ -456,6 +550,7 @@ export default class ActiveAppRamExtension extends Extension {
     // Re-insert at new position
     const position = this._settings.get_enum("panel-position");
     const box = PANEL_BOXES[position] ?? DEFAULT_PANEL_BOX;
+    const offset = this._settings.get_int("panel-position-offset");
 
     // The container corresponding to the box name
     const container = Main.panel.statusArea;
@@ -464,7 +559,7 @@ export default class ActiveAppRamExtension extends Extension {
       delete container[this.metadata.uuid];
     }
 
-    Main.panel.addToStatusArea(this.metadata.uuid, this._indicator, 0, box);
+    Main.panel.addToStatusArea(this.metadata.uuid, this._indicator, offset, box);
   }
 
   /**
@@ -487,6 +582,7 @@ export default class ActiveAppRamExtension extends Extension {
   _onSettingChanged(key) {
     switch (key) {
       case "panel-position":
+      case "panel-position-offset":
         this._repositionIndicator();
         break;
       case "refresh-interval":
@@ -654,7 +750,7 @@ export default class ActiveAppRamExtension extends Extension {
     this._topProcessesSection.addMenuItem(headerItem);
 
     const memUnit = this._settings.get_enum("memory-unit");
-    const processes = getTopRamProcesses(5);
+    const processes = getTopRamProcesses(TOP_PROCESSES_COUNT);
 
     if (processes.length === 0) {
       const emptyItem = new PopupMenu.PopupMenuItem("No data available", {
@@ -665,9 +761,47 @@ export default class ActiveAppRamExtension extends Extension {
     }
 
     for (const { name, rssKb } of processes) {
-      const itemLabel = `${truncateName(name, 15)}  ${formatMemory(rssKb, memUnit)}`;
+      const memStr = formatMemory(rssKb, memUnit);
+      const ramPct = this._totalMemoryKb
+        ? ((rssKb / this._totalMemoryKb) * 100).toFixed(1)
+        : "?";
+      const cpuPct = getCpuPercentForProcessName(name);
+      const cpuStr = cpuPct !== null ? `${cpuPct}%` : "N/A";
+      const itemLabel = `${truncateName(name, 15)} | ${memStr} (${ramPct}%) | ${cpuStr}`;
       const item = new PopupMenu.PopupMenuItem(itemLabel, { reactive: false });
       this._topProcessesSection.addMenuItem(item);
+    }
+  }
+
+  /**
+   * Rebuilds the top CPU processes section in the indicator menu.
+   * Called each time the menu is opened.
+   */
+  _refreshTopCpuMenu() {
+    if (!this._topCpuSection) return;
+
+    this._topCpuSection.removeAll();
+
+    const headerItem = new PopupMenu.PopupMenuItem("Top CPU Processes", {
+      reactive: false,
+    });
+    headerItem.label.set_style("font-weight: bold;");
+    this._topCpuSection.addMenuItem(headerItem);
+
+    const processes = getTopCpuProcesses(TOP_PROCESSES_COUNT);
+
+    if (processes.length === 0) {
+      const emptyItem = new PopupMenu.PopupMenuItem("No data available", {
+        reactive: false,
+      });
+      this._topCpuSection.addMenuItem(emptyItem);
+      return;
+    }
+
+    for (const { name, cpuPct } of processes) {
+      const itemLabel = `${truncateName(name, 15)}  ${cpuPct.toFixed(1)}%`;
+      const item = new PopupMenu.PopupMenuItem(itemLabel, { reactive: false });
+      this._topCpuSection.addMenuItem(item);
     }
   }
 }

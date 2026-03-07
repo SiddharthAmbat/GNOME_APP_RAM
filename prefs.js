@@ -44,6 +44,20 @@ export default class ActiveAppRamPreferences extends ExtensionPreferences {
     });
     positionGroup.add(positionRow);
 
+    const offsetRow = new Adw.SpinRow({
+      title: "Position Offset",
+      subtitle: "Shift position within the panel box (+1 right, -1 left)",
+      adjustment: new Gtk.Adjustment({
+        lower: -20,
+        upper: 20,
+        step_increment: 1,
+        page_increment: 1,
+        value: settings.get_int("panel-position-offset"),
+      }),
+    });
+    settings.bind("panel-position-offset", offsetRow, "value", Gio.SettingsBindFlags.DEFAULT);
+    positionGroup.add(offsetRow);
+
     // ── Display page ───────────────────────────────────────────────────────
     const displayPage = new Adw.PreferencesPage({
       title: "Display",

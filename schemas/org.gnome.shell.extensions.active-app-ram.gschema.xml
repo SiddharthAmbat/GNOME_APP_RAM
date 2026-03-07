@@ -29,6 +29,13 @@
       <description>Where the indicator appears in the top bar (left, center, or right).</description>
     </key>
 
+    <key name="panel-position-offset" type="i">
+      <default>0</default>
+      <summary>Panel position offset</summary>
+      <description>Fine-tune the indicator position within the chosen panel box. Use positive values to shift right/down and negative to shift left/up relative to other extensions.</description>
+      <range min="-20" max="20"/>
+    </key>
+
     <!-- Display settings -->
     <key name="show-app-name" type="b">
       <default>true</default>
