@@ -179,45 +179,6 @@ function getTopRamProcesses(count) {
 }
 
 /**
- * Returns the top N processes by CPU usage (%), aggregated by process name.
- * Runs:
- *   ps -eo comm,%cpu --no-headers
- *
- * @param {number} count - Number of top processes to return.
- * @returns {{name: string, cpuPct: number}[]} Sorted array of top processes.
- */
-function getTopCpuProcesses(count) {
-  try {
-    const [ok, stdout] = GLib.spawn_sync(
-      null,
-      ["ps", "-eo", "comm,%cpu", "--no-headers"],
-      null,
-      GLib.SpawnFlags.SEARCH_PATH,
-      null
-    );
-    if (!ok || !stdout) return [];
-
-    const text = new TextDecoder().decode(stdout).trim();
-    const map = new Map();
-    for (const line of text.split("\n")) {
-      const parts = line.trim().split(/\s+/);
-      if (parts.length < 2) continue;
-      const name = parts[0];
-      const cpu = parseFloat(parts[parts.length - 1]);
-      if (isNaN(cpu)) continue;
-      map.set(name, (map.get(name) || 0) + cpu);
-    }
-
-    return [...map.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, count)
-      .map(([name, cpuPct]) => ({ name, cpuPct }));
-  } catch (_e) {
-    return [];
-  }
-}
-
-/**
  * Returns the total RSS (in kilobytes) across all processes with the given
  * process name by running:
  *   ps -C NAME -o rss=
@@ -396,6 +357,7 @@ export default class ActiveAppRamExtension extends Extension {
     this._totalMemoryKb = null;
     this._topProcessesSection = null;
     this._topCpuSection = null;
+    this._topCpuSampleTimeoutId = null;
     // Delta-based CPU sampling state
     this._prevCpuProcessName = null;
     this._prevProcessJiffies = null;
@@ -445,6 +407,12 @@ export default class ActiveAppRamExtension extends Extension {
       if (isOpen) {
         this._refreshTopProcessesMenu();
         this._refreshTopCpuMenu();
+      } else {
+        // Cancel any pending CPU sampling when the menu is closed
+        if (this._topCpuSampleTimeoutId !== null) {
+          GLib.source_remove(this._topCpuSampleTimeoutId);
+          this._topCpuSampleTimeoutId = null;
+        }
       }
     });
 
@@ -497,6 +465,12 @@ export default class ActiveAppRamExtension extends Extension {
    */
   disable() {
     this._stopTimer();
+
+    // Cancel any pending CPU sampling timeout
+    if (this._topCpuSampleTimeoutId !== null) {
+      GLib.source_remove(this._topCpuSampleTimeoutId);
+      this._topCpuSampleTimeoutId = null;
+    }
 
     if (this._focusSignalId !== null) {
       global.display.disconnect(this._focusSignalId);
@@ -774,7 +748,9 @@ export default class ActiveAppRamExtension extends Extension {
   }
 
   /**
-   * Rebuilds the top CPU processes section in the indicator menu.
+   * Rebuilds the top CPU processes section in the indicator menu using a
+   * delta-based /proc/stat sampling approach for accurate real-time CPU usage.
+   * Takes two samples 1 second apart and computes per-process CPU%.
    * Called each time the menu is opened.
    */
   _refreshTopCpuMenu() {
@@ -782,26 +758,130 @@ export default class ActiveAppRamExtension extends Extension {
 
     this._topCpuSection.removeAll();
 
-    const headerItem = new PopupMenu.PopupMenuItem("Top CPU Processes", {
-      reactive: false,
-    });
+    const headerItem = new PopupMenu.PopupMenuItem(
+      "Top CPU Processes (sampling…)",
+      { reactive: false }
+    );
     headerItem.label.set_style("font-weight: bold;");
     this._topCpuSection.addMenuItem(headerItem);
 
-    const processes = getTopCpuProcesses(TOP_PROCESSES_COUNT);
+    // Cancel any previous sampling that may still be pending
+    if (this._topCpuSampleTimeoutId !== null) {
+      GLib.source_remove(this._topCpuSampleTimeoutId);
+      this._topCpuSampleTimeoutId = null;
+    }
 
-    if (processes.length === 0) {
-      const emptyItem = new PopupMenu.PopupMenuItem("No data available", {
+    // Take first sample
+    const sample1 = this._sampleAllProcessCpu();
+    const total1 = readTotalCpuJiffies();
+
+    // After 1 second take a second sample and compute deltas
+    this._topCpuSampleTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+      this._topCpuSampleTimeoutId = null;
+      if (!this._topCpuSection) return GLib.SOURCE_REMOVE;
+
+      const sample2 = this._sampleAllProcessCpu();
+      const total2 = readTotalCpuJiffies();
+
+      this._topCpuSection.removeAll();
+
+      const header = new PopupMenu.PopupMenuItem("Top CPU Processes", {
         reactive: false,
       });
-      this._topCpuSection.addMenuItem(emptyItem);
-      return;
-    }
+      header.label.set_style("font-weight: bold;");
+      this._topCpuSection.addMenuItem(header);
 
-    for (const { name, cpuPct } of processes) {
-      const itemLabel = `${truncateName(name, 15)}  ${cpuPct.toFixed(1)}%`;
-      const item = new PopupMenu.PopupMenuItem(itemLabel, { reactive: false });
-      this._topCpuSection.addMenuItem(item);
+      if (!total1 || !total2 || total2 <= total1) {
+        this._topCpuSection.addMenuItem(
+          new PopupMenu.PopupMenuItem("No data available", { reactive: false })
+        );
+        return GLib.SOURCE_REMOVE;
+      }
+
+      const totalDelta = total2 - total1;
+      const results = [];
+
+      for (const [name, jiffies2] of sample2.entries()) {
+        const jiffies1 = sample1.get(name) || 0;
+        const processDelta = jiffies2 - jiffies1;
+        if (processDelta > 0) {
+          results.push({ name, cpuPct: (processDelta / totalDelta) * 100 });
+        }
+      }
+
+      results.sort((a, b) => b.cpuPct - a.cpuPct);
+      const top5 = results.slice(0, TOP_PROCESSES_COUNT);
+
+      if (top5.length === 0) {
+        this._topCpuSection.addMenuItem(
+          new PopupMenu.PopupMenuItem("No data available", { reactive: false })
+        );
+        return GLib.SOURCE_REMOVE;
+      }
+
+      for (const { name, cpuPct } of top5) {
+        const itemLabel = `${truncateName(name, 15)}  ${cpuPct.toFixed(1)}%`;
+        const item = new PopupMenu.PopupMenuItem(itemLabel, { reactive: false });
+        this._topCpuSection.addMenuItem(item);
+      }
+
+      return GLib.SOURCE_REMOVE;
+    });
+  }
+
+  /**
+   * Reads /proc/[pid]/comm and /proc/[pid]/stat for all numeric PIDs,
+   * returning a Map of processName -> aggregated (utime + stime) jiffies.
+   *
+   * @returns {Map<string, number>} Map of process name to total CPU jiffies.
+   */
+  _sampleAllProcessCpu() {
+    const map = new Map();
+    try {
+      const procDir = Gio.File.new_for_path("/proc");
+      const enumerator = procDir.enumerate_children(
+        "standard::name,standard::type",
+        Gio.FileQueryInfoFlags.NONE,
+        null
+      );
+
+      let info;
+      while ((info = enumerator.next_file(null)) !== null) {
+        const entryName = info.get_name();
+        if (!/^\d+$/.test(entryName)) continue;
+
+        try {
+          const [okComm, commData] = GLib.file_get_contents(
+            `/proc/${entryName}/comm`
+          );
+          if (!okComm || !commData) continue;
+          const comm = new TextDecoder().decode(commData).trim();
+          if (!comm) continue;
+
+          const [okStat, statData] = GLib.file_get_contents(
+            `/proc/${entryName}/stat`
+          );
+          if (!okStat || !statData) continue;
+          const statText = new TextDecoder().decode(statData);
+
+          // Strip "pid (comm) " prefix so process names with spaces don't
+          // throw off field indexing.
+          const afterComm = statText.replace(/^\d+ \(.*?\) /, "");
+          const fields = afterComm.split(" ");
+          // fields[0]=state, ..., fields[11]=utime, fields[12]=stime
+          const utime = parseInt(fields[11], 10);
+          const stime = parseInt(fields[12], 10);
+          if (isNaN(utime) || isNaN(stime)) continue;
+
+          map.set(comm, (map.get(comm) || 0) + utime + stime);
+        } catch (_e) {
+          continue;
+        }
+      }
+      enumerator.close(null);
+    } catch (_e) {
+      // ignore — return whatever was collected
     }
+    return map;
   }
 }
