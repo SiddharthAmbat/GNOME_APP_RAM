@@ -356,8 +356,6 @@ export default class ActiveAppRamExtension extends Extension {
     this._settingsChangedIds = [];
     this._totalMemoryKb = null;
     this._topProcessesSection = null;
-    this._topCpuSection = null;
-    this._topCpuSampleTimeoutId = null;
     // Delta-based CPU sampling state
     this._prevCpuProcessName = null;
     this._prevProcessJiffies = null;
@@ -387,11 +385,6 @@ export default class ActiveAppRamExtension extends Extension {
     this._topProcessesSection = new PopupMenu.PopupMenuSection();
     this._indicator.menu.addMenuItem(this._topProcessesSection);
 
-    // Add a section for top CPU processes (refreshed each time menu opens)
-    this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-    this._topCpuSection = new PopupMenu.PopupMenuSection();
-    this._indicator.menu.addMenuItem(this._topCpuSection);
-
     // Separator between top-process list and settings item
     this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
@@ -406,13 +399,6 @@ export default class ActiveAppRamExtension extends Extension {
     this._indicator.menu.connect("open-state-changed", (_menu, isOpen) => {
       if (isOpen) {
         this._refreshTopProcessesMenu();
-        this._refreshTopCpuMenu();
-      } else {
-        // Cancel any pending CPU sampling when the menu is closed
-        if (this._topCpuSampleTimeoutId !== null) {
-          GLib.source_remove(this._topCpuSampleTimeoutId);
-          this._topCpuSampleTimeoutId = null;
-        }
       }
     });
 
@@ -466,12 +452,6 @@ export default class ActiveAppRamExtension extends Extension {
   disable() {
     this._stopTimer();
 
-    // Cancel any pending CPU sampling timeout
-    if (this._topCpuSampleTimeoutId !== null) {
-      GLib.source_remove(this._topCpuSampleTimeoutId);
-      this._topCpuSampleTimeoutId = null;
-    }
-
     if (this._focusSignalId !== null) {
       global.display.disconnect(this._focusSignalId);
       this._focusSignalId = null;
@@ -491,7 +471,6 @@ export default class ActiveAppRamExtension extends Extension {
       this._indicator = null;
       this._label = null;
       this._topProcessesSection = null;
-      this._topCpuSection = null;
     }
 
     this._prevCpuProcessName = null;
@@ -739,149 +718,9 @@ export default class ActiveAppRamExtension extends Extension {
       const ramPct = this._totalMemoryKb
         ? ((rssKb / this._totalMemoryKb) * 100).toFixed(1)
         : "?";
-      const cpuPct = getCpuPercentForProcessName(name);
-      const cpuStr = cpuPct !== null ? `${cpuPct}%` : "N/A";
-      const itemLabel = `${truncateName(name, 15)} | ${memStr} (${ramPct}%) | ${cpuStr}`;
+      const itemLabel = `${truncateName(name, 15)} | ${memStr} (${ramPct}%)`;
       const item = new PopupMenu.PopupMenuItem(itemLabel, { reactive: false });
       this._topProcessesSection.addMenuItem(item);
     }
-  }
-
-  /**
-   * Rebuilds the top CPU processes section in the indicator menu using a
-   * delta-based /proc/stat sampling approach for accurate real-time CPU usage.
-   * Takes two samples 1 second apart and computes per-process CPU%.
-   * Called each time the menu is opened.
-   */
-  _refreshTopCpuMenu() {
-    if (!this._topCpuSection) return;
-
-    this._topCpuSection.removeAll();
-
-    const headerItem = new PopupMenu.PopupMenuItem(
-      "Top CPU Processes (sampling…)",
-      { reactive: false }
-    );
-    headerItem.label.set_style("font-weight: bold;");
-    this._topCpuSection.addMenuItem(headerItem);
-
-    // Cancel any previous sampling that may still be pending
-    if (this._topCpuSampleTimeoutId !== null) {
-      GLib.source_remove(this._topCpuSampleTimeoutId);
-      this._topCpuSampleTimeoutId = null;
-    }
-
-    // Take first sample
-    const sample1 = this._sampleAllProcessCpu();
-    const total1 = readTotalCpuJiffies();
-
-    // After 1 second take a second sample and compute deltas
-    this._topCpuSampleTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
-      this._topCpuSampleTimeoutId = null;
-      if (!this._topCpuSection) return GLib.SOURCE_REMOVE;
-
-      const sample2 = this._sampleAllProcessCpu();
-      const total2 = readTotalCpuJiffies();
-
-      this._topCpuSection.removeAll();
-
-      const header = new PopupMenu.PopupMenuItem("Top CPU Processes", {
-        reactive: false,
-      });
-      header.label.set_style("font-weight: bold;");
-      this._topCpuSection.addMenuItem(header);
-
-      if (!total1 || !total2 || total2 <= total1) {
-        this._topCpuSection.addMenuItem(
-          new PopupMenu.PopupMenuItem("No data available", { reactive: false })
-        );
-        return GLib.SOURCE_REMOVE;
-      }
-
-      const totalDelta = total2 - total1;
-      const results = [];
-
-      for (const [name, jiffies2] of sample2.entries()) {
-        const jiffies1 = sample1.get(name) || 0;
-        const processDelta = jiffies2 - jiffies1;
-        if (processDelta > 0) {
-          results.push({ name, cpuPct: (processDelta / totalDelta) * 100 });
-        }
-      }
-
-      results.sort((a, b) => b.cpuPct - a.cpuPct);
-      const top5 = results.slice(0, TOP_PROCESSES_COUNT);
-
-      if (top5.length === 0) {
-        this._topCpuSection.addMenuItem(
-          new PopupMenu.PopupMenuItem("No data available", { reactive: false })
-        );
-        return GLib.SOURCE_REMOVE;
-      }
-
-      for (const { name, cpuPct } of top5) {
-        const itemLabel = `${truncateName(name, 15)}  ${cpuPct.toFixed(1)}%`;
-        const item = new PopupMenu.PopupMenuItem(itemLabel, { reactive: false });
-        this._topCpuSection.addMenuItem(item);
-      }
-
-      return GLib.SOURCE_REMOVE;
-    });
-  }
-
-  /**
-   * Reads /proc/[pid]/comm and /proc/[pid]/stat for all numeric PIDs,
-   * returning a Map of processName -> aggregated (utime + stime) jiffies.
-   *
-   * @returns {Map<string, number>} Map of process name to total CPU jiffies.
-   */
-  _sampleAllProcessCpu() {
-    const map = new Map();
-    try {
-      const procDir = Gio.File.new_for_path("/proc");
-      const enumerator = procDir.enumerate_children(
-        "standard::name,standard::type",
-        Gio.FileQueryInfoFlags.NONE,
-        null
-      );
-
-      let info;
-      while ((info = enumerator.next_file(null)) !== null) {
-        const entryName = info.get_name();
-        if (!/^\d+$/.test(entryName)) continue;
-
-        try {
-          const [okComm, commData] = GLib.file_get_contents(
-            `/proc/${entryName}/comm`
-          );
-          if (!okComm || !commData) continue;
-          const comm = new TextDecoder().decode(commData).trim();
-          if (!comm) continue;
-
-          const [okStat, statData] = GLib.file_get_contents(
-            `/proc/${entryName}/stat`
-          );
-          if (!okStat || !statData) continue;
-          const statText = new TextDecoder().decode(statData);
-
-          // Strip "pid (comm) " prefix so process names with spaces don't
-          // throw off field indexing.
-          const afterComm = statText.replace(/^\d+ \(.*?\) /, "");
-          const fields = afterComm.split(" ");
-          // fields[0]=state, ..., fields[11]=utime, fields[12]=stime
-          const utime = parseInt(fields[11], 10);
-          const stime = parseInt(fields[12], 10);
-          if (isNaN(utime) || isNaN(stime)) continue;
-
-          map.set(comm, (map.get(comm) || 0) + utime + stime);
-        } catch (_e) {
-          continue;
-        }
-      }
-      enumerator.close(null);
-    } catch (_e) {
-      // ignore — return whatever was collected
-    }
-    return map;
   }
 }
