@@ -60,40 +60,76 @@ function getProcessNameForPid(pid) {
 }
 
 /**
- * Returns the total CPU usage percentage across all processes with the given
- * process name by running:
- *   ps -C NAME -o %cpu=
- * and summing all values.
+ * Reads the total CPU jiffies from the first "cpu" line of /proc/stat.
  *
- * @param {string} processName - The process name to look up.
- * @returns {number|null} Total CPU percentage (integer), or null if unavailable.
+ * @returns {number|null} Sum of all CPU time fields, or null on failure.
  */
-function getCpuPercentForProcessName(processName) {
+function readTotalCpuJiffies() {
+  try {
+    const [ok, contents] = GLib.file_get_contents("/proc/stat");
+    if (!ok || !contents) return null;
+
+    const text = new TextDecoder().decode(contents);
+    const firstLine = text.split("\n")[0]; // "cpu  <fields...>"
+    const fields = firstLine.trim().split(/\s+/).slice(1); // drop "cpu" label
+    return fields.reduce((sum, v) => sum + parseInt(v, 10), 0);
+  } catch (_e) {
+    return null;
+  }
+}
+
+/**
+ * Reads the total CPU jiffies (utime + stime) across all processes whose
+ * comm matches processName exactly.  Uses pgrep -x to enumerate matching
+ * PIDs, then reads /proc/<pid>/stat for each one.
+ *
+ * @param {string} processName - Exact process comm name to look up.
+ * @returns {number|null} Sum of utime+stime jiffies, or null on failure.
+ */
+function readProcessCpuJiffies(processName) {
   if (!processName) return null;
 
   try {
     const [ok, stdout] = GLib.spawn_sync(
       null,
-      ["ps", "-C", processName, "-o", "%cpu="],
+      ["pgrep", "-x", processName],
       null,
       GLib.SpawnFlags.SEARCH_PATH,
       null
     );
-    if (!ok || !stdout) return null;
+    // pgrep exits 1 (ok may still be true) when no matches; stdout will be empty
+    if (!stdout) return null;
 
     const text = new TextDecoder().decode(stdout).trim();
     if (text.length === 0) return null;
 
     let total = 0;
-    let parsed = 0;
     for (const line of text.split("\n")) {
-      const val = parseFloat(line.trim());
-      if (!isNaN(val)) {
-        total += val;
-        parsed++;
+      const pid = line.trim();
+      if (!pid) continue;
+
+      try {
+        const [statOk, statContents] = GLib.file_get_contents(
+          `/proc/${pid}/stat`
+        );
+        if (!statOk || !statContents) continue;
+
+        const statText = new TextDecoder().decode(statContents).trim();
+        // Strip "pid (comm) " prefix so that process names containing spaces
+        // or special characters do not throw off field indexing.
+        const afterComm = statText.replace(/^\d+ \(.*?\) /, "");
+        const fields = afterComm.split(" ");
+        // After the strip: fields[0]=state, ..., fields[11]=utime, fields[12]=stime
+        const utime = parseInt(fields[11], 10);
+        const stime = parseInt(fields[12], 10);
+        if (!isNaN(utime) && !isNaN(stime)) {
+          total += utime + stime;
+        }
+      } catch (_e) {
+        // Skip unreadable PIDs (process may have exited)
       }
     }
-    return parsed > 0 ? Math.round(total) : null;
+    return total;
   } catch (_e) {
     return null;
   }
@@ -277,6 +313,10 @@ export default class ActiveAppRamExtension extends Extension {
     this._settingsChangedIds = [];
     this._totalMemoryKb = null;
     this._topProcessesSection = null;
+    // Delta-based CPU sampling state
+    this._prevCpuProcessName = null;
+    this._prevProcessJiffies = null;
+    this._prevTotalJiffies = null;
   }
 
   /**
@@ -386,6 +426,10 @@ export default class ActiveAppRamExtension extends Extension {
       this._label = null;
       this._topProcessesSection = null;
     }
+
+    this._prevCpuProcessName = null;
+    this._prevProcessJiffies = null;
+    this._prevTotalJiffies = null;
   }
 
   // ─── Private helpers ────────────────────────────────────────────────────────
@@ -546,11 +590,36 @@ export default class ActiveAppRamExtension extends Extension {
       }
     }
 
-    // CPU usage
+    // CPU usage — delta-based via /proc/stat and /proc/<pid>/stat
     if (showCpuUsage && processName) {
-      const cpuPct = getCpuPercentForProcessName(processName);
-      if (cpuPct !== null) {
-        parts.push(`${cpuPct}%`);
+      if (processName !== this._prevCpuProcessName) {
+        // App switched: take the first sample and wait for the next tick
+        this._prevCpuProcessName = processName;
+        this._prevProcessJiffies = readProcessCpuJiffies(processName);
+        this._prevTotalJiffies = readTotalCpuJiffies();
+        // No display yet — need two samples to compute a delta
+      } else {
+        const curProcessJiffies = readProcessCpuJiffies(processName);
+        const curTotalJiffies = readTotalCpuJiffies();
+
+        if (
+          curProcessJiffies !== null &&
+          curTotalJiffies !== null &&
+          this._prevProcessJiffies !== null &&
+          this._prevTotalJiffies !== null
+        ) {
+          const deltaProcess = curProcessJiffies - this._prevProcessJiffies;
+          const deltaTotal = curTotalJiffies - this._prevTotalJiffies;
+
+          if (deltaTotal > 0) {
+            const cpuPct = Math.round((deltaProcess / deltaTotal) * 100);
+            parts.push(`${cpuPct}%`);
+          }
+        }
+
+        // Advance the stored sample for the next tick
+        this._prevProcessJiffies = curProcessJiffies;
+        this._prevTotalJiffies = curTotalJiffies;
       }
     }
 
